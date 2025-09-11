@@ -67,7 +67,7 @@ public class OpdsService {
             case "2.0" -> {
                 int page = parseIntParam(request, "page", 1);
                 int size = parseIntParam(request, "size", 50);
-                String q = request.getParameter("q");
+                String q = (queryParam != null && !queryParam.isBlank()) ? queryParam : request.getParameter("q");
                 var result = getAllowedBooksPage(q, libraryId, shelfId, page, size);
                 var qp = new java.util.LinkedHashMap<String,String>();
                 if (q != null && !q.isBlank()) qp.put("q", q);
