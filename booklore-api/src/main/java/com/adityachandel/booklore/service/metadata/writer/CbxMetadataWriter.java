@@ -7,7 +7,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
+import org.w3c.dom.Text;
 
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
@@ -136,6 +138,9 @@ public class CbxMetadataWriter implements MetadataWriter {
                 setElement(doc, root, "Genre", join(set));
                 removeElement(root, "Tags");
             });
+
+            // Cleanup whitespace-only text nodes
+            normalizeWhitespace(root);
 
             // Serialize ComicInfo.xml
             Transformer transformer = TransformerFactory.newInstance().newTransformer();
@@ -340,6 +345,27 @@ public class CbxMetadataWriter implements MetadataWriter {
         NodeList nodes = root.getElementsByTagName(tag);
         for (int i = nodes.getLength() - 1; i >= 0; i--) {
             root.removeChild(nodes.item(i));
+        }
+    }
+    
+    private void normalizeWhitespace(Node node) {
+        NodeList children = node.getChildNodes();
+        for (int i = children.getLength() - 1; i >= 0; i--) {
+            Node child = children.item(i);
+            switch (child.getNodeType()) {
+                case Node.TEXT_NODE -> {
+                    Text text = (Text) child;
+                    String content = text.getWholeText();
+                    if (content == null || content.isBlank()) {
+                        node.removeChild(text);
+                    } else {
+                        text.replaceWholeText(content.trim());
+                    }
+                }
+                case Node.ELEMENT_NODE -> normalizeWhitespace(child);
+                default -> {
+                }
+            }
         }
     }
 
