@@ -93,6 +93,32 @@ public class MetadataChangeDetector {
         return !diffs.isEmpty();
     }
 
+    public static boolean affectsComicInfo(BookMetadata newMeta, BookMetadataEntity existingMeta, MetadataClearFlags clear) {
+        if (existingMeta == null) return true;
+        if (clear == null) return true;
+
+        List<String> diffs = new ArrayList<>();
+        compareValue(diffs, "title", clear.isTitle(), newMeta.getTitle(), existingMeta.getTitle(), () -> !isTrue(existingMeta.getTitleLocked()));
+        compareValue(diffs, "publisher", clear.isPublisher(), newMeta.getPublisher(), existingMeta.getPublisher(), () -> !isTrue(existingMeta.getPublisherLocked()));
+        compareValue(diffs, "description", clear.isDescription(), newMeta.getDescription(), existingMeta.getDescription(), () -> !isTrue(existingMeta.getDescriptionLocked()));
+        compareValue(diffs, "seriesName", clear.isSeriesName(), newMeta.getSeriesName(), existingMeta.getSeriesName(), () -> !isTrue(existingMeta.getSeriesNameLocked()));
+        compareValue(diffs, "seriesNumber", clear.isSeriesNumber(), newMeta.getSeriesNumber(), existingMeta.getSeriesNumber(), () -> !isTrue(existingMeta.getSeriesNumberLocked()));
+        compareValue(diffs, "seriesTotal", clear.isSeriesTotal(), newMeta.getSeriesTotal(), existingMeta.getSeriesTotal(), () -> !isTrue(existingMeta.getSeriesTotalLocked()));
+        compareValue(diffs, "publishedDate", clear.isPublishedDate(), newMeta.getPublishedDate(), existingMeta.getPublishedDate(), () -> !isTrue(existingMeta.getPublishedDateLocked()));
+        compareValue(diffs, "pageCount", clear.isPageCount(), newMeta.getPageCount(), existingMeta.getPageCount(), () -> !isTrue(existingMeta.getPageCountLocked()));
+        compareValue(diffs, "language", clear.isLanguage(), newMeta.getLanguage(), existingMeta.getLanguage(), () -> !isTrue(existingMeta.getLanguageLocked()));
+
+        Set<String> newAuthors = newMeta.getAuthors() != null ? newMeta.getAuthors() : Collections.emptySet();
+        Set<String> existingAuthors = toNameSet(existingMeta.getAuthors());
+        compareValue(diffs, "authors", clear.isAuthors(), newAuthors, existingAuthors, () -> !isTrue(existingMeta.getAuthorsLocked()));
+
+        Set<String> newCategories = newMeta.getCategories() != null ? newMeta.getCategories() : Collections.emptySet();
+        Set<String> existingCategories = toNameSet(existingMeta.getCategories());
+        compareValue(diffs, "categories", clear.isCategories(), newCategories, existingCategories, () -> !isTrue(existingMeta.getCategoriesLocked()));
+
+        return !diffs.isEmpty();
+    }
+
     public static boolean hasLockChanges(BookMetadata newMeta, BookMetadataEntity existingMeta) {
         if (differsLock(newMeta.getTitleLocked(), existingMeta.getTitleLocked())) return true;
         if (differsLock(newMeta.getSubtitleLocked(), existingMeta.getSubtitleLocked())) return true;

@@ -81,6 +81,11 @@ public class BookMetadataUpdater {
         boolean backupCover = settings.isBackupCover();
         BookFileType bookType = bookEntity.getBookType();
 
+        boolean affectsEmbeddedMetadata = hasValueChanges;
+        if (bookType == BookFileType.CBX) {
+            affectsEmbeddedMetadata = MetadataChangeDetector.affectsComicInfo(newMetadata, metadata, clearFlags);
+        }
+
         if (writeToFile && backupEnabled && (bookType != BookFileType.CBX || convertCbrCb7ToCbz)) {
             try {
                 MetadataBackupRestore service = metadataBackupRestoreFactory.getService(bookType);
@@ -97,7 +102,7 @@ public class BookMetadataUpdater {
         updateAuthorsIfNeeded(newMetadata, metadata, clearFlags);
         updateCategoriesIfNeeded(newMetadata, metadata, clearFlags, mergeCategories);
         bookReviewUpdateService.updateBookReviews(newMetadata, metadata, clearFlags, mergeCategories);
-        updateThumbnailIfNeeded(bookId, newMetadata, metadata, setThumbnail);
+        boolean thumbnailUpdated = updateThumbnailIfNeeded(bookId, newMetadata, metadata, setThumbnail);
 
         try {
             Float score = metadataMatchService.calculateMatchScore(bookEntity);
@@ -106,13 +111,13 @@ public class BookMetadataUpdater {
             log.warn("Failed to calculate metadata match score for book ID {}: {}", bookId, e.getMessage());
         }
 
-        if ((writeToFile && hasValueChanges) || thumbnailRequiresUpdate) {
+        if ((writeToFile && affectsEmbeddedMetadata) || thumbnailUpdated) {
             if (bookType == BookFileType.CBX && !convertCbrCb7ToCbz) {
                 log.info("CBX metadata writing disabled for book ID {}", bookId);
             } else {
                 metadataWriterFactory.getWriter(bookType).ifPresent(writer -> {
                     try {
-                        String thumbnailUrl = setThumbnail ? newMetadata.getThumbnailUrl() : null;
+                        String thumbnailUrl = thumbnailUpdated ? newMetadata.getThumbnailUrl() : null;
 
                         if ((StringUtils.hasText(thumbnailUrl) && isLocalOrPrivateUrl(thumbnailUrl) || Boolean.TRUE.equals(metadata.getCoverLocked()))) {
                             log.debug("Blocked local/private thumbnail URL: {}", thumbnailUrl);
@@ -248,14 +253,15 @@ public class BookMetadataUpdater {
     }
 
 
-    private void updateThumbnailIfNeeded(long bookId, BookMetadata m, BookMetadataEntity e, boolean set) {
+    private boolean updateThumbnailIfNeeded(long bookId, BookMetadata m, BookMetadataEntity e, boolean set) {
         if (Boolean.TRUE.equals(e.getCoverLocked())) {
-            return; // Locked — do nothing
+            return false; // Locked — do nothing
         }
-        if (!set) return;
-        if (!StringUtils.hasText(m.getThumbnailUrl()) || isLocalOrPrivateUrl(m.getThumbnailUrl())) return;
+        if (!set) return false;
+        if (!StringUtils.hasText(m.getThumbnailUrl()) || isLocalOrPrivateUrl(m.getThumbnailUrl())) return false;
         fileService.createThumbnailFromUrl(bookId, m.getThumbnailUrl());
         e.setCoverUpdatedOn(Instant.now());
+        return true;
     }
 
     private void updateLocks(BookMetadata m, BookMetadataEntity e) {
