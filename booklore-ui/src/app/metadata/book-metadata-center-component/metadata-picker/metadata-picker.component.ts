@@ -16,6 +16,7 @@ import {takeUntilDestroyed} from '@angular/core/rxjs-interop';
 import {AutoComplete} from 'primeng/autocomplete';
 import {Image} from 'primeng/image';
 import {LazyLoadImageModule} from 'ng-lazyload-image';
+import {MetadataOperationToastService} from '../../../core/service/metadata-operation-toast.service';
 
 @Component({
   selector: 'app-metadata-picker',
@@ -111,6 +112,7 @@ export class MetadataPickerComponent implements OnInit {
   private bookService = inject(BookService);
   protected urlHelper = inject(UrlHelperService);
   private destroyRef = inject(DestroyRef);
+  private metadataToast = inject(MetadataOperationToastService);
 
   constructor() {
     this.metadataForm = new FormGroup({
@@ -328,20 +330,21 @@ export class MetadataPickerComponent implements OnInit {
 
   onSave(): void {
     this.isSaving = true;
+    this.metadataToast.start();
     const updatedBookMetadata = this.buildMetadataWrapper(undefined);
     this.bookService.updateBookMetadata(this.currentBookId, updatedBookMetadata, false).subscribe({
-      next: (bookMetadata) => {
+      next: () => {
         this.isSaving = false;
         Object.keys(this.copiedFields).forEach((field) => {
           if (this.copiedFields[field]) {
             this.savedFields[field] = true;
           }
         });
-        this.messageService.add({severity: 'info', summary: 'Success', detail: 'Book metadata updated'});
+        this.metadataToast.success('Book metadata updated.');
       },
       error: () => {
         this.isSaving = false;
-        this.messageService.add({severity: 'error', summary: 'Error', detail: 'Failed to update book metadata'});
+        this.metadataToast.error('Failed to update book metadata');
       }
     });
   }
@@ -457,24 +460,41 @@ export class MetadataPickerComponent implements OnInit {
   }
 
   private updateMetadata(shouldLockAllFields: boolean | undefined): void {
+    const progressSummary = shouldLockAllFields === true
+      ? 'Locking Metadata'
+      : shouldLockAllFields === false
+        ? 'Unlocking Metadata'
+        : undefined;
+
+    const progressDetail = shouldLockAllFields === true
+      ? 'Locking all metadata fields. Large comic archives may take a moment.'
+      : shouldLockAllFields === false
+        ? 'Unlocking all metadata fields so you can edit them again.'
+        : undefined;
+
+    this.metadataToast.start(progressDetail, progressSummary);
+
     this.bookService.updateBookMetadata(this.currentBookId, this.buildMetadataWrapper(shouldLockAllFields), false).subscribe({
-      next: (response) => {
-        if (shouldLockAllFields !== undefined) {
-          this.messageService.add({
-            severity: 'success',
-            summary: shouldLockAllFields ? 'Metadata Locked' : 'Metadata Unlocked',
-            detail: shouldLockAllFields
-              ? 'All fields have been successfully locked.'
-              : 'All fields have been successfully unlocked.',
-          });
-        }
+      next: () => {
+        const successSummary = shouldLockAllFields === true
+          ? 'Metadata Locked'
+          : shouldLockAllFields === false
+            ? 'Metadata Unlocked'
+            : undefined;
+
+        const successDetail = shouldLockAllFields === true
+          ? 'All fields have been successfully locked.'
+          : shouldLockAllFields === false
+            ? 'All fields have been successfully unlocked.'
+            : undefined;
+
+        this.metadataToast.success(successDetail, successSummary);
       },
       error: () => {
-        this.messageService.add({
-          severity: 'error',
-          summary: 'Error',
-          detail: 'Failed to update lock state',
-        });
+        const errorDetail = shouldLockAllFields !== undefined
+          ? 'Failed to update lock state'
+          : 'Failed to save metadata changes';
+        this.metadataToast.error(errorDetail, shouldLockAllFields !== undefined ? 'Error' : undefined);
       }
     });
   }

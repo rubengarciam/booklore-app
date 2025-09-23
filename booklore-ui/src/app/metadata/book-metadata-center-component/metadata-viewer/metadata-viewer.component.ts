@@ -37,6 +37,7 @@ import {ProgressSpinner} from 'primeng/progressspinner';
 import {TieredMenu} from 'primeng/tieredmenu';
 import {AdditionalFileUploaderComponent} from '../../../book/components/additional-file-uploader/additional-file-uploader.component';
 import {Image} from 'primeng/image';
+import {MetadataOperationToastService} from '../../../core/service/metadata-operation-toast.service';
 
 @Component({
   selector: 'app-metadata-viewer',
@@ -58,6 +59,7 @@ export class MetadataViewerComponent implements OnInit, OnChanges {
   protected urlHelper = inject(UrlHelperService);
   protected userService = inject(UserService);
   private confirmationService = inject(ConfirmationService);
+  private metadataToast = inject(MetadataOperationToastService);
   private router = inject(Router);
   private destroyRef = inject(DestroyRef);
   private dialogRef?: DynamicDialogRef;
@@ -487,24 +489,17 @@ export class MetadataViewerComponent implements OnInit, OnChanges {
   onPersonalRatingChange(book: Book, {value: personalRating}: RatingRateEvent): void {
     if (!book?.metadata) return;
     const updatedMetadata = {...book.metadata, personalRating};
+    this.metadataToast.start('Saving personal rating changes. Large comic archives may take a moment.');
     this.bookService.updateBookMetadata(book.id, {
       metadata: updatedMetadata,
       clearFlags: {personalRating: false}
     }, false).subscribe({
       next: () => {
-        this.messageService.add({
-          severity: 'success',
-          summary: 'Rating Saved',
-          detail: 'Personal rating updated successfully'
-        });
+        this.metadataToast.success('Personal rating updated successfully.', 'Rating Saved');
       },
       error: err => {
         console.error('Failed to update personal rating:', err);
-        this.messageService.add({
-          severity: 'error',
-          summary: 'Update Failed',
-          detail: 'Could not update personal rating'
-        });
+        this.metadataToast.error('Could not update personal rating', 'Update Failed');
       }
     });
   }
@@ -512,24 +507,17 @@ export class MetadataViewerComponent implements OnInit, OnChanges {
   resetPersonalRating(book: Book): void {
     if (!book?.metadata) return;
     const updatedMetadata = {...book.metadata, personalRating: null};
+    this.metadataToast.start('Clearing personal rating. Any ComicInfo.xml updates will continue in the background.');
     this.bookService.updateBookMetadata(book.id, {
       metadata: updatedMetadata,
       clearFlags: {personalRating: true}
     }, false).subscribe({
       next: () => {
-        this.messageService.add({
-          severity: 'info',
-          summary: 'Rating Reset',
-          detail: 'Personal rating has been cleared.'
-        });
+        this.metadataToast.success('Personal rating has been cleared.', 'Rating Reset');
       },
       error: err => {
         console.error('Failed to reset personal rating:', err);
-        this.messageService.add({
-          severity: 'error',
-          summary: 'Reset Failed',
-          detail: 'Could not reset personal rating'
-        });
+        this.metadataToast.error('Could not reset personal rating', 'Reset Failed');
       }
     });
   }

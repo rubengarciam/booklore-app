@@ -47,6 +47,7 @@ import { IftaLabel } from "primeng/iftalabel";
 import { CoverSearchComponent } from "../../cover-search/cover-search.component";
 import { Image } from "primeng/image";
 import { LazyLoadImageModule } from "ng-lazyload-image";
+import { MetadataOperationToastService } from "../../../core/service/metadata-operation-toast.service";
 
 @Component({
   selector: "app-metadata-editor",
@@ -85,6 +86,7 @@ export class MetadataEditorComponent implements OnInit {
   protected urlHelper = inject(UrlHelperService);
   private dialogService = inject(DialogService);
   private destroyRef = inject(DestroyRef);
+  private metadataToast = inject(MetadataOperationToastService);
 
   metadataForm: FormGroup;
   currentBookId!: number;
@@ -332,6 +334,7 @@ export class MetadataEditorComponent implements OnInit {
 
   onSave(): void {
     this.isSaving = true;
+    this.metadataToast.start();
     this.bookService
       .updateBookMetadata(
         this.currentBookId,
@@ -339,21 +342,13 @@ export class MetadataEditorComponent implements OnInit {
         false
       )
       .subscribe({
-        next: (response) => {
+        next: () => {
           this.isSaving = false;
-          this.messageService.add({
-            severity: "info",
-            summary: "Success",
-            detail: "Book metadata updated",
-          });
+          this.metadataToast.success("Book metadata updated.");
         },
         error: (err) => {
           this.isSaving = false;
-          this.messageService.add({
-            severity: "error",
-            summary: "Error",
-            detail: err?.error?.message || "Failed to update book metadata",
-          });
+          this.metadataToast.error(err?.error?.message || "Failed to update book metadata");
         },
       });
   }
@@ -517,28 +512,44 @@ export class MetadataEditorComponent implements OnInit {
 
   private updateMetadata(shouldLockAllFields: boolean | undefined): void {
     let metadataUpdateWrapper = this.buildMetadataWrapper(shouldLockAllFields);
+
+    const progressSummary = shouldLockAllFields === true
+      ? "Locking Metadata"
+      : shouldLockAllFields === false
+        ? "Unlocking Metadata"
+        : undefined;
+
+    const progressDetail = shouldLockAllFields === true
+      ? "Locking all metadata fields. Large comic archives may take a moment."
+      : shouldLockAllFields === false
+        ? "Unlocking all metadata fields so you can edit them again."
+        : undefined;
+
+    this.metadataToast.start(progressDetail, progressSummary);
+
     this.bookService
       .updateBookMetadata(this.currentBookId, metadataUpdateWrapper, false)
       .subscribe({
-        next: (response) => {
-          if (shouldLockAllFields !== undefined) {
-            this.messageService.add({
-              severity: "success",
-              summary: shouldLockAllFields
-                ? "Metadata Locked"
-                : "Metadata Unlocked",
-              detail: shouldLockAllFields
-                ? "All fields have been successfully locked."
-                : "All fields have been successfully unlocked.",
-            });
-          }
+        next: () => {
+          const successSummary = shouldLockAllFields === true
+            ? "Metadata Locked"
+            : shouldLockAllFields === false
+              ? "Metadata Unlocked"
+              : undefined;
+
+          const successDetail = shouldLockAllFields === true
+            ? "All fields have been successfully locked."
+            : shouldLockAllFields === false
+              ? "All fields have been successfully unlocked."
+              : undefined;
+
+          this.metadataToast.success(successDetail, successSummary);
         },
         error: () => {
-          this.messageService.add({
-            severity: "error",
-            summary: "Error",
-            detail: "Failed to update lock state",
-          });
+          const errorDetail = shouldLockAllFields !== undefined
+            ? "Failed to update lock state"
+            : "Failed to save metadata changes";
+          this.metadataToast.error(errorDetail, shouldLockAllFields !== undefined ? "Error" : undefined);
         },
       });
   }
