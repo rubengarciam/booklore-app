@@ -1,16 +1,20 @@
 package com.adityachandel.booklore.service.metadata.writer;
 
 import com.adityachandel.booklore.model.MetadataClearFlags;
+import com.adityachandel.booklore.model.entity.BookEntity;
 import com.adityachandel.booklore.model.entity.BookMetadataEntity;
 import com.adityachandel.booklore.model.enums.BookFileType;
+import com.adityachandel.booklore.service.FileFingerprint;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.web.multipart.MultipartFile;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.w3c.dom.Text;
 
+import javax.imageio.ImageIO;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -19,12 +23,16 @@ import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URL;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -32,9 +40,11 @@ import java.time.LocalDate;
 import java.util.Enumeration;
 import java.util.Locale;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+import java.util.stream.Stream;
 import com.github.junrar.Archive;
 import com.github.junrar.rarfile.FileHeader;
 import org.apache.commons.compress.archivers.sevenz.SevenZFile;
@@ -43,6 +53,158 @@ import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry;
 @Slf4j
 @Component
 public class CbxMetadataWriter implements MetadataWriter {
+
+    private static final String DEFAULT_COVER_ENTRY = "cover.jpg";
+    private static final int BUFFER_SIZE = 8192;
+
+    private static class CoverPayload {
+        private final byte[] bytes;
+        private final int width;
+        private final int height;
+
+        private CoverPayload(byte[] bytes, int width, int height) {
+            this.bytes = bytes;
+            this.width = width;
+            this.height = height;
+        }
+
+        private byte[] getBytes() {
+            return bytes;
+        }
+
+        private int getWidth() {
+            return width;
+        }
+
+        private int getHeight() {
+            return height;
+        }
+    }
+
+    @Override
+    public void replaceCoverImageFromUpload(BookEntity bookEntity, MultipartFile multipartFile) {
+        if (multipartFile == null || multipartFile.isEmpty()) {
+            log.warn("Cover upload failed: empty or null file.");
+            return;
+        }
+
+        replaceCoverImage(bookEntity, () -> {
+            try {
+                return prepareCoverPayload(multipartFile.getBytes());
+            } catch (Exception e) {
+                log.warn("Failed to read uploaded cover image: {}", e.getMessage(), e);
+                return null;
+            }
+        });
+    }
+
+    @Override
+    public void replaceCoverImageFromUrl(BookEntity bookEntity, String url) {
+        if (url == null || url.isBlank()) {
+            log.warn("Cover update via URL failed: empty or null URL.");
+            return;
+        }
+
+        replaceCoverImage(bookEntity, () -> {
+            try {
+                byte[] bytes = loadImageBytes(url);
+                return prepareCoverPayload(bytes);
+            } catch (Exception e) {
+                log.warn("Failed to load cover image from {}: {}", url, e.getMessage(), e);
+                return null;
+            }
+        });
+    }
+
+    private void replaceCoverImage(BookEntity bookEntity, Supplier<CoverPayload> payloadSupplier) {
+        if (bookEntity == null) {
+            log.warn("Cover update skipped: book entity is null.");
+            return;
+        }
+
+        CoverPayload payload = payloadSupplier.get();
+        if (payload == null || payload.getBytes().length == 0) {
+            log.warn("Cover update skipped for {}: no valid image data available.", bookEntity.getFileName());
+            return;
+        }
+
+        try {
+            applyCoverToArchive(bookEntity, payload);
+        } catch (Exception e) {
+            log.warn("Failed to persist cover image for {}: {}", bookEntity.getFileName(), e.getMessage(), e);
+        }
+    }
+
+    private CoverPayload prepareCoverPayload(byte[] rawBytes) throws Exception {
+        if (rawBytes == null || rawBytes.length == 0) {
+            return null;
+        }
+
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(rawBytes)) {
+            BufferedImage source = ImageIO.read(bais);
+            if (source == null) {
+                log.warn("Unable to decode cover image bytes.");
+                return null;
+            }
+
+            BufferedImage rgbImage = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_RGB);
+            Graphics2D graphics = rgbImage.createGraphics();
+            graphics.drawImage(source, 0, 0, Color.WHITE, null);
+            graphics.dispose();
+
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                if (!ImageIO.write(rgbImage, "jpg", baos)) {
+                    log.warn("Failed to encode cover image as JPEG.");
+                    return null;
+                }
+                return new CoverPayload(baos.toByteArray(), rgbImage.getWidth(), rgbImage.getHeight());
+            }
+        }
+    }
+
+    private byte[] loadImageBytes(String pathOrUrl) throws Exception {
+        if (pathOrUrl == null || pathOrUrl.isBlank()) {
+            return null;
+        }
+
+        if (pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")) {
+            try (InputStream stream = new URL(pathOrUrl).openStream()) {
+                return stream.readAllBytes();
+            }
+        }
+
+        Path path = Path.of(pathOrUrl);
+        if (!Files.exists(path)) {
+            log.warn("Image path does not exist: {}", pathOrUrl);
+            return null;
+        }
+        return Files.readAllBytes(path);
+    }
+
+    private void applyCoverToArchive(BookEntity bookEntity, CoverPayload payload) throws Exception {
+        File file = new File(bookEntity.getFullFilePath().toUri());
+        String nameLower = file.getName().toLowerCase(Locale.ROOT);
+
+        if (nameLower.endsWith(".cbz")) {
+            updateZipArchiveWithCover(bookEntity, file, payload);
+        } else if (nameLower.endsWith(".cb7")) {
+            updateSevenZArchiveWithCover(bookEntity, file, payload);
+        } else if (nameLower.endsWith(".cbr")) {
+            updateRarArchiveWithCover(bookEntity, file, payload);
+        } else {
+            log.warn("Unsupported CBX format for cover update: {}", file.getName());
+        }
+    }
+
+    private static class ComicInfoContext {
+        private final Document document;
+        private final String entryName;
+
+        private ComicInfoContext(Document document, String entryName) {
+            this.document = document;
+            this.entryName = entryName;
+        }
+    }
 
     @Override
     public void writeMetadataToFile(File file, BookMetadataEntity metadata, String thumbnailUrl, boolean restoreMode, MetadataClearFlags clearFlags) {
@@ -67,6 +229,7 @@ public class CbxMetadataWriter implements MetadataWriter {
             }
 
             // Build (or load and update) ComicInfo.xml as a Document
+            String comicInfoEntryName = null;
             Document doc;
             if (isCbz) {
                 try (ZipFile zipFile = new ZipFile(file)) {
@@ -75,9 +238,13 @@ public class CbxMetadataWriter implements MetadataWriter {
                         try (InputStream is = zipFile.getInputStream(existing)) {
                             doc = buildSecureDocument(is);
                         }
+                        comicInfoEntryName = sanitizeEntryName(existing.getName());
                     } else {
                         doc = newEmptyComicInfo();
                     }
+                }
+                if (comicInfoEntryName == null || comicInfoEntryName.isBlank()) {
+                    comicInfoEntryName = "ComicInfo.xml";
                 }
             } else if (isCb7) {
                 try (SevenZFile sevenZ = new SevenZFile(file)) {
@@ -91,9 +258,13 @@ public class CbxMetadataWriter implements MetadataWriter {
                         try (InputStream is = sevenZ.getInputStream(existing)) {
                             doc = buildSecureDocument(is);
                         }
+                        comicInfoEntryName = sanitizeEntryName(existing.getName());
                     } else {
                         doc = newEmptyComicInfo();
                     }
+                }
+                if (comicInfoEntryName == null || comicInfoEntryName.isBlank()) {
+                    comicInfoEntryName = "ComicInfo.xml";
                 }
             } else { // CBR
                 try (Archive archive = new Archive(file)) {
@@ -105,9 +276,13 @@ public class CbxMetadataWriter implements MetadataWriter {
                                 doc = buildSecureDocument(is);
                             }
                         }
+                        comicInfoEntryName = sanitizeEntryName(existing.getFileNameString());
                     } else {
                         doc = newEmptyComicInfo();
                     }
+                }
+                if (comicInfoEntryName == null || comicInfoEntryName.isBlank()) {
+                    comicInfoEntryName = "ComicInfo.xml";
                 }
             }
 
@@ -149,38 +324,118 @@ public class CbxMetadataWriter implements MetadataWriter {
             ByteArrayOutputStream xmlBaos = new ByteArrayOutputStream();
             transformer.transform(new DOMSource(doc), new StreamResult(xmlBaos));
             byte[] xmlBytes = xmlBaos.toByteArray();
+=======
+            // Cleanup whitespace-only text nodes
+            normalizeWhitespace(root);
+
+            String normalizedComicInfoEntryName = comicInfoEntryName.replace('\\', '/');
+            String legacyCoverEntryName = sanitizeEntryName(extractFrontCoverImageName(doc));
+            if (legacyCoverEntryName != null) {
+                legacyCoverEntryName = legacyCoverEntryName.replace('\\', '/');
+            }
+
+            CoverPayload coverPayload = null;
+            String coverEntryName = null;
+            if (thumbnailUrl != null && !thumbnailUrl.isBlank()) {
+                try {
+                    byte[] coverBytes = loadImageBytes(thumbnailUrl);
+                    coverPayload = prepareCoverPayload(coverBytes);
+                    if (coverPayload != null) {
+                        coverEntryName = determineCoverEntryName(doc);
+                        coverEntryName = coverEntryName.replace('\\', '/');
+                        ensureFrontCoverPage(doc, coverEntryName, coverPayload.getWidth(), coverPayload.getHeight());
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to prepare cover image for ComicInfo.xml from '{}': {}", thumbnailUrl, e.getMessage());
+                    coverPayload = null;
+                    coverEntryName = null;
+                }
+            }
+
+            byte[] xmlBytes = documentToBytes(doc);
+            boolean replaceCover = coverPayload != null && coverEntryName != null;
+>>>>>>> Stashed changes
 
             // Repack depending on container type; always write to a temp target then atomic move
             if (isCbz) {
                 Path temp = Files.createTempFile("cbx_edit", ".cbz");
-                repackZipReplacingComicInfo(file.toPath(), temp, xmlBytes);
+                try (ZipFile zipFile = new ZipFile(file);
+                     ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(temp))) {
+                    Enumeration<? extends ZipEntry> entries = zipFile.entries();
+                    while (entries.hasMoreElements()) {
+                        ZipEntry entry = entries.nextElement();
+                        String entryName = entry.getName();
+                        String normalizedEntry = entryName.replace('\\', '/');
+                        if (!isSafeEntryName(entryName)) {
+                            log.warn("Skipping unsafe ZIP entry name: {}", entryName);
+                            continue;
+                        }
+                        if (normalizedEntry.equals(normalizedComicInfoEntryName)) {
+                            continue;
+                        }
+                        if (replaceCover) {
+                            if (normalizedEntry.equals(coverEntryName)) {
+                                continue;
+                            }
+                            if (legacyCoverEntryName != null && normalizedEntry.equals(legacyCoverEntryName)) {
+                                continue;
+                            }
+                        }
+                        zos.putNextEntry(new ZipEntry(normalizedEntry));
+                        try (InputStream is = zipFile.getInputStream(entry)) {
+                            is.transferTo(zos);
+                        }
+                        zos.closeEntry();
+                    }
+                    if (replaceCover) {
+                        writeZipEntry(zos, coverEntryName, coverPayload.getBytes());
+                    }
+                    writeZipEntry(zos, normalizedComicInfoEntryName, xmlBytes);
+                }
                 atomicReplace(temp, file.toPath());
                 writeSucceeded = true;
                 return;
             }
 
             if (isCb7) {
-                // Convert to CBZ with updated ComicInfo.xml
                 Path tempZip = Files.createTempFile("cbx_edit", ".cbz");
                 try (SevenZFile sevenZ = new SevenZFile(file);
                      ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
-                    for (SevenZArchiveEntry e : sevenZ.getEntries()) {
-                        if (e.isDirectory()) continue;
-                        String entryName = e.getName();
-                        if (isComicInfoName(entryName)) continue; // skip old
-                        if (!isSafeEntryName(entryName)) {
-                            log.warn("Skipping unsafe 7z entry name: {}", entryName);
+                    SevenZArchiveEntry entry;
+                    byte[] buffer = new byte[BUFFER_SIZE];
+                    while ((entry = sevenZ.getNextEntry()) != null) {
+                        if (entry.isDirectory()) {
                             continue;
                         }
-                        zos.putNextEntry(new ZipEntry(entryName));
-                        try (InputStream is = sevenZ.getInputStream(e)) {
-                            if (is != null) is.transferTo(zos);
+                        String entryName = entry.getName();
+                        String normalizedEntry = entryName.replace('\\', '/');
+                        if (!isSafeEntryName(entryName)) {
+                            log.warn("Skipping unsafe 7z entry name: {}", entryName);
+                            drainSevenZEntry(sevenZ, buffer);
+                            continue;
+                        }
+                        if (isComicInfoName(entryName) || normalizedEntry.equals(normalizedComicInfoEntryName)) {
+                            drainSevenZEntry(sevenZ, buffer);
+                            continue;
+                        }
+                        if (replaceCover) {
+                            if (normalizedEntry.equals(coverEntryName) ||
+                                    (legacyCoverEntryName != null && normalizedEntry.equals(legacyCoverEntryName))) {
+                                drainSevenZEntry(sevenZ, buffer);
+                                continue;
+                            }
+                        }
+                        zos.putNextEntry(new ZipEntry(normalizedEntry));
+                        int read;
+                        while ((read = sevenZ.read(buffer, 0, buffer.length)) > 0) {
+                            zos.write(buffer, 0, read);
                         }
                         zos.closeEntry();
                     }
-                    zos.putNextEntry(new ZipEntry("ComicInfo.xml"));
-                    zos.write(xmlBytes);
-                    zos.closeEntry();
+                    if (replaceCover) {
+                        writeZipEntry(zos, coverEntryName, coverPayload.getBytes());
+                    }
+                    writeZipEntry(zos, normalizedComicInfoEntryName, xmlBytes);
                 }
                 Path target = file.toPath().resolveSibling(stripExtension(file.getName()) + ".cbz");
                 atomicReplace(tempZip, target);
@@ -193,86 +448,68 @@ public class CbxMetadataWriter implements MetadataWriter {
             String rarBin = System.getenv().getOrDefault("BOOKLORE_RAR_BIN", "rar");
             boolean rarAvailable = isRarAvailable(rarBin);
 
-            if (rarAvailable) {
-                Path tempDir = Files.createTempDirectory("cbx_rar_");
-                try {
-                    // Extract entire RAR into a temp directory
-                    try (Archive archive = new Archive(file)) {
-                        for (FileHeader fh : archive.getFileHeaders()) {
-                            String name = fh.getFileName();
-                            if (name == null || name.isBlank()) continue;
-                            if (!isSafeEntryName(name)) {
-                                log.warn("Skipping unsafe RAR entry name: {}", name);
-                                continue;
-                            }
-                            Path out = tempDir.resolve(name).normalize();
-                            if (!out.startsWith(tempDir)) {
-                                log.warn("Skipping traversal entry outside tempDir: {}", name);
-                                continue;
-                            }
-                            if (fh.isDirectory()) {
-                                Files.createDirectories(out);
-                            } else {
-                                Files.createDirectories(out.getParent());
-                                try (OutputStream os = Files.newOutputStream(out, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-                                    archive.extractFile(fh, os);
-                                }
-                            }
+            Path tempDir = Files.createTempDirectory("cbx_rar_");
+            try {
+                extractRarToDirectory(file, tempDir);
+
+                Path comicInfoPath = tempDir.resolve(normalizedComicInfoEntryName).normalize();
+                if (!comicInfoPath.startsWith(tempDir)) {
+                    throw new IllegalStateException("ComicInfo path escapes extraction directory");
+                }
+                Files.createDirectories(comicInfoPath.getParent());
+                Files.write(comicInfoPath, xmlBytes);
+
+                if (replaceCover) {
+                    Path coverPath = tempDir.resolve(coverEntryName).normalize();
+                    if (!coverPath.startsWith(tempDir)) {
+                        throw new IllegalStateException("Cover path escapes extraction directory");
+                    }
+                    Files.createDirectories(coverPath.getParent());
+                    Files.write(coverPath, coverPayload.getBytes());
+
+                    if (legacyCoverEntryName != null && !legacyCoverEntryName.equals(coverEntryName)) {
+                        Path legacyPath = tempDir.resolve(legacyCoverEntryName).normalize();
+                        if (legacyPath.startsWith(tempDir)) {
+                            Files.deleteIfExists(legacyPath);
                         }
                     }
+                }
 
-                    // Write/replace ComicInfo.xml in extracted tree root
-                    Path comicInfo = tempDir.resolve("ComicInfo.xml");
-                    Files.write(comicInfo, xmlBytes);
-
-                    // Rebuild RAR in-place (replace original file)
+                if (rarAvailable) {
                     Path targetRar = file.toPath().toAbsolutePath().normalize();
-                    String rarExec = isSafeExecutable(rarBin) ? rarBin : "rar"; // prefer validated path, then PATH lookup
+                    String rarExec = isSafeExecutable(rarBin) ? rarBin : "rar";
                     ProcessBuilder pb = new ProcessBuilder(rarExec, "a", "-idq", "-ep1", "-ma5", targetRar.toString(), ".");
                     pb.directory(tempDir.toFile());
-                    Process p = pb.start();
-                    int code = p.waitFor();
+                    Process process = pb.start();
+                    int code = process.waitFor();
                     if (code == 0) {
                         writeSucceeded = true;
                         return;
-                    } else {
-                        log.warn("RAR creation failed with exit code {}. Falling back to CBZ conversion for {}", code, file.getName());
                     }
-                } finally {
-                    try { // cleanup temp dir
-                        java.nio.file.Files.walk(tempDir)
-                            .sorted(java.util.Comparator.reverseOrder())
-                            .forEach(path -> { try { Files.deleteIfExists(path); } catch (Exception ignore) {} });
-                    } catch (Exception ignore) {}
+                    log.warn("RAR creation failed with exit code {}. Falling back to CBZ conversion for {}", code, file.getName());
+                } else {
+                    log.warn("`rar` binary not found. Falling back to CBZ conversion for {}", file.getName());
                 }
-            } else {
-                log.warn("`rar` binary not found. Falling back to CBZ conversion for {}", file.getName());
-            }
 
-            // Fallback: convert the CBR to CBZ containing updated ComicInfo.xml
-            Path tempZip = Files.createTempFile("cbx_edit", ".cbz");
-            try (Archive archive = new Archive(file);
-                 ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
-                for (FileHeader fh : archive.getFileHeaders()) {
-                    if (fh.isDirectory()) continue;
-                    String entryName = fh.getFileName();
-                    if (isComicInfoName(entryName)) continue; // skip old
-                    if (!isSafeEntryName(entryName)) {
-                        log.warn("Skipping unsafe RAR entry name: {}", entryName);
-                        continue;
+                Path tempZip = Files.createTempFile("cbx_edit", ".cbz");
+                try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
+                    try (Stream<Path> walk = Files.walk(tempDir)) {
+                        walk.filter(Files::isRegularFile).forEach(path -> addFileToZip(zos, tempDir, path));
                     }
-                    zos.putNextEntry(new ZipEntry(entryName));
-                    archive.extractFile(fh, zos);
-                    zos.closeEntry();
+                } catch (RuntimeException runtimeException) {
+                    if (runtimeException.getCause() instanceof Exception cause) {
+                        throw cause;
+                    }
+                    throw runtimeException;
                 }
-                zos.putNextEntry(new ZipEntry("ComicInfo.xml"));
-                zos.write(xmlBytes);
-                zos.closeEntry();
+
+                Path target = file.toPath().resolveSibling(stripExtension(file.getName()) + ".cbz");
+                atomicReplace(tempZip, target);
+                Files.deleteIfExists(file.toPath());
+                writeSucceeded = true;
+            } finally {
+                deleteDirectoryRecursively(tempDir);
             }
-            Path target = file.toPath().resolveSibling(stripExtension(file.getName()) + ".cbz");
-            atomicReplace(tempZip, target);
-            try { Files.deleteIfExists(file.toPath()); } catch (Exception ignored) {}
-            writeSucceeded = true;
         } catch (Exception e) {
             // Attempt to restore the original file from backup
             try {
@@ -292,6 +529,479 @@ public class CbxMetadataWriter implements MetadataWriter {
     }
 
     // ----------------------- helpers -----------------------
+
+    private void updateZipArchiveWithCover(BookEntity bookEntity, File file, CoverPayload payload) throws Exception {
+        try (ZipFile zipFile = new ZipFile(file)) {
+            ZipEntry comicInfoEntry = findComicInfoEntry(zipFile);
+            Document doc;
+            if (comicInfoEntry != null) {
+                try (InputStream is = zipFile.getInputStream(comicInfoEntry)) {
+                    doc = buildSecureDocument(is);
+                }
+            } else {
+                doc = newEmptyComicInfo();
+            }
+
+            String legacyCoverEntryName = sanitizeEntryName(extractFrontCoverImageName(doc));
+            if (legacyCoverEntryName != null) {
+                legacyCoverEntryName = legacyCoverEntryName.replace('\\', '/');
+            }
+
+            String coverEntryName = determineCoverEntryName(doc).replace('\\', '/');
+            ensureFrontCoverPage(doc, coverEntryName, payload.getWidth(), payload.getHeight());
+            byte[] xmlBytes = documentToBytes(doc);
+
+            String comicInfoName = comicInfoEntry != null ? comicInfoEntry.getName() : "ComicInfo.xml";
+            comicInfoName = sanitizeEntryName(comicInfoName);
+            if (comicInfoName == null || comicInfoName.isBlank()) {
+                comicInfoName = "ComicInfo.xml";
+            }
+            String normalizedComicInfoName = comicInfoName.replace('\\', '/');
+
+            Path tempZip = Files.createTempFile("cbx_cover_", ".cbz");
+            try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
+                Enumeration<? extends ZipEntry> entries = zipFile.entries();
+                while (entries.hasMoreElements()) {
+                    ZipEntry entry = entries.nextElement();
+                    String entryName = entry.getName();
+                    String normalizedEntry = entryName.replace('\\', '/');
+                    if (!isSafeEntryName(entryName)) {
+                        log.warn("Skipping unsafe ZIP entry name: {}", entryName);
+                        continue;
+                    }
+                    if (normalizedEntry.equals(normalizedComicInfoName)) {
+                        continue;
+                    }
+                    if (normalizedEntry.equals(coverEntryName)) {
+                        continue;
+                    }
+                    if (legacyCoverEntryName != null && normalizedEntry.equals(legacyCoverEntryName)) {
+                        continue;
+                    }
+                    zos.putNextEntry(new ZipEntry(normalizedEntry));
+                    try (InputStream inputStream = zipFile.getInputStream(entry)) {
+                        inputStream.transferTo(zos);
+                    }
+                    zos.closeEntry();
+                }
+
+                writeZipEntry(zos, coverEntryName, payload.getBytes());
+                writeZipEntry(zos, normalizedComicInfoName, xmlBytes);
+            }
+            atomicReplace(tempZip, file.toPath());
+        }
+
+        refreshFileStats(bookEntity, file.toPath());
+    }
+
+    private void updateSevenZArchiveWithCover(BookEntity bookEntity, File file, CoverPayload payload) throws Exception {
+        ComicInfoContext context = loadComicInfoFromSevenZ(file);
+        Document doc = context.document;
+        String comicInfoName = context.entryName != null ? sanitizeEntryName(context.entryName) : null;
+        if (comicInfoName == null || comicInfoName.isBlank()) {
+            comicInfoName = "ComicInfo.xml";
+        }
+        String normalizedComicInfoName = comicInfoName.replace('\\', '/');
+
+        String legacyCoverEntryName = sanitizeEntryName(extractFrontCoverImageName(doc));
+        if (legacyCoverEntryName != null) {
+            legacyCoverEntryName = legacyCoverEntryName.replace('\\', '/');
+        }
+
+        String coverEntryName = determineCoverEntryName(doc).replace('\\', '/');
+        ensureFrontCoverPage(doc, coverEntryName, payload.getWidth(), payload.getHeight());
+        byte[] xmlBytes = documentToBytes(doc);
+
+        Path tempZip = Files.createTempFile("cbx_cover_", ".cbz");
+        try (SevenZFile sevenZ = new SevenZFile(file);
+             ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
+
+            SevenZArchiveEntry entry;
+            byte[] buffer = new byte[BUFFER_SIZE];
+            while ((entry = sevenZ.getNextEntry()) != null) {
+                if (entry.isDirectory()) {
+                    continue;
+                }
+                String entryName = entry.getName();
+                String normalizedEntry = entryName.replace('\\', '/');
+                if (!isSafeEntryName(entryName)) {
+                    log.warn("Skipping unsafe 7z entry name: {}", entryName);
+                    drainSevenZEntry(sevenZ, buffer);
+                    continue;
+                }
+                if (isComicInfoName(entryName) || normalizedEntry.equals(normalizedComicInfoName)) {
+                    drainSevenZEntry(sevenZ, buffer);
+                    continue;
+                }
+                if (normalizedEntry.equals(coverEntryName) ||
+                        (legacyCoverEntryName != null && normalizedEntry.equals(legacyCoverEntryName))) {
+                    drainSevenZEntry(sevenZ, buffer);
+                    continue;
+                }
+
+                zos.putNextEntry(new ZipEntry(normalizedEntry));
+                int read;
+                while ((read = sevenZ.read(buffer, 0, buffer.length)) > 0) {
+                    zos.write(buffer, 0, read);
+                }
+                zos.closeEntry();
+            }
+
+            writeZipEntry(zos, coverEntryName, payload.getBytes());
+            writeZipEntry(zos, normalizedComicInfoName, xmlBytes);
+        }
+
+        Path target = file.toPath().resolveSibling(stripExtension(file.getName()) + ".cbz");
+        atomicReplace(tempZip, target);
+        Files.deleteIfExists(file.toPath());
+        bookEntity.setFileName(target.getFileName().toString());
+        refreshFileStats(bookEntity, target);
+    }
+
+    private void updateRarArchiveWithCover(BookEntity bookEntity, File file, CoverPayload payload) throws Exception {
+        ComicInfoContext context = loadComicInfoFromRar(file);
+        Document doc = context.document;
+        String comicInfoName = context.entryName != null ? sanitizeEntryName(context.entryName) : null;
+        if (comicInfoName == null || comicInfoName.isBlank()) {
+            comicInfoName = "ComicInfo.xml";
+        }
+
+        String legacyCoverEntryName = sanitizeEntryName(extractFrontCoverImageName(doc));
+        if (legacyCoverEntryName != null) {
+            legacyCoverEntryName = legacyCoverEntryName.replace('\\', '/');
+        }
+
+        String coverEntryName = determineCoverEntryName(doc).replace('\\', '/');
+        ensureFrontCoverPage(doc, coverEntryName, payload.getWidth(), payload.getHeight());
+        byte[] xmlBytes = documentToBytes(doc);
+
+        Path tempDir = Files.createTempDirectory("cbx_rar_cover_");
+        try {
+            extractRarToDirectory(file, tempDir);
+
+            Path coverFile = tempDir.resolve(coverEntryName).normalize();
+            if (!coverFile.startsWith(tempDir)) {
+                throw new IllegalStateException("Cover path escapes extraction directory");
+            }
+            Files.createDirectories(coverFile.getParent());
+            Files.write(coverFile, payload.getBytes());
+
+            if (legacyCoverEntryName != null && !legacyCoverEntryName.equals(coverEntryName)) {
+                Path legacyPath = tempDir.resolve(legacyCoverEntryName).normalize();
+                if (legacyPath.startsWith(tempDir)) {
+                    Files.deleteIfExists(legacyPath);
+                }
+            }
+
+            Path comicInfoFile = tempDir.resolve(comicInfoName).normalize();
+            if (!comicInfoFile.startsWith(tempDir)) {
+                throw new IllegalStateException("ComicInfo path escapes extraction directory");
+            }
+            Files.createDirectories(comicInfoFile.getParent());
+            Files.write(comicInfoFile, xmlBytes);
+
+            String rarBin = System.getenv().getOrDefault("BOOKLORE_RAR_BIN", "rar");
+            boolean rarAvailable = isRarAvailable(rarBin);
+            if (rarAvailable) {
+                Path target = file.toPath().toAbsolutePath().normalize();
+                String rarExec = isSafeExecutable(rarBin) ? rarBin : "rar";
+                ProcessBuilder pb = new ProcessBuilder(rarExec, "a", "-idq", "-ep1", "-ma5", target.toString(), ".");
+                pb.directory(tempDir.toFile());
+                Process process = pb.start();
+                int exitCode = process.waitFor();
+                if (exitCode == 0) {
+                    refreshFileStats(bookEntity, target);
+                    return;
+                }
+                log.warn("RAR creation failed with exit code {}. Falling back to CBZ conversion for {}", exitCode, file.getName());
+            }
+
+            Path tempZip = Files.createTempFile("cbx_cover_", ".cbz");
+            try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
+                try (Stream<Path> walk = Files.walk(tempDir)) {
+                    walk.filter(Files::isRegularFile).forEach(path -> addFileToZip(zos, tempDir, path));
+                }
+            } catch (RuntimeException runtimeException) {
+                if (runtimeException.getCause() instanceof Exception cause) {
+                    throw cause;
+                }
+                throw runtimeException;
+            }
+
+            Path target = file.toPath().resolveSibling(stripExtension(file.getName()) + ".cbz");
+            atomicReplace(tempZip, target);
+            Files.deleteIfExists(file.toPath());
+            bookEntity.setFileName(target.getFileName().toString());
+            refreshFileStats(bookEntity, target);
+        } finally {
+            deleteDirectoryRecursively(tempDir);
+        }
+    }
+
+    private ComicInfoContext loadComicInfoFromSevenZ(File file) throws Exception {
+        try (SevenZFile sevenZ = new SevenZFile(file)) {
+            SevenZArchiveEntry entry;
+            byte[] buffer = new byte[BUFFER_SIZE];
+            while ((entry = sevenZ.getNextEntry()) != null) {
+                if (entry.isDirectory()) {
+                    continue;
+                }
+                if (entry.getName() != null && isComicInfoName(entry.getName())) {
+                    byte[] bytes = readSevenZEntryBytes(sevenZ, buffer);
+                    if (bytes != null) {
+                        try (InputStream is = new ByteArrayInputStream(bytes)) {
+                            Document doc = buildSecureDocument(is);
+                            return new ComicInfoContext(doc, entry.getName());
+                        }
+                    }
+                } else {
+                    drainSevenZEntry(sevenZ, buffer);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load ComicInfo.xml from {}: {}", file.getName(), e.getMessage());
+        }
+        return new ComicInfoContext(newEmptyComicInfo(), null);
+    }
+
+    private ComicInfoContext loadComicInfoFromRar(File file) throws Exception {
+        try (Archive archive = new Archive(file)) {
+            FileHeader header = findComicInfoHeader(archive);
+            if (header != null) {
+                try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                    archive.extractFile(header, baos);
+                    try (InputStream is = new ByteArrayInputStream(baos.toByteArray())) {
+                        Document doc = buildSecureDocument(is);
+                        return new ComicInfoContext(doc, header.getFileNameString());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load ComicInfo.xml from {}: {}", file.getName(), e.getMessage());
+        }
+        return new ComicInfoContext(newEmptyComicInfo(), null);
+    }
+
+    private byte[] readSevenZEntryBytes(SevenZFile sevenZ, byte[] buffer) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int read;
+        while ((read = sevenZ.read(buffer, 0, buffer.length)) > 0) {
+            baos.write(buffer, 0, read);
+        }
+        return baos.toByteArray();
+    }
+
+    private void drainSevenZEntry(SevenZFile sevenZ, byte[] buffer) {
+        try {
+            while (sevenZ.read(buffer, 0, buffer.length) > 0) {
+                // no-op
+            }
+        } catch (Exception ignore) {
+        }
+    }
+
+    private void extractRarToDirectory(File file, Path tempDir) throws Exception {
+        try (Archive archive = new Archive(file)) {
+            for (FileHeader fh : archive.getFileHeaders()) {
+                String name = fh.getFileName();
+                if (name == null || name.isBlank()) {
+                    continue;
+                }
+                if (!isSafeEntryName(name)) {
+                    log.warn("Skipping unsafe RAR entry name: {}", name);
+                    continue;
+                }
+                Path out = tempDir.resolve(name).normalize();
+                if (!out.startsWith(tempDir)) {
+                    log.warn("Skipping traversal entry outside tempDir: {}", name);
+                    continue;
+                }
+                if (fh.isDirectory()) {
+                    Files.createDirectories(out);
+                } else {
+                    Files.createDirectories(out.getParent());
+                    try (OutputStream os = Files.newOutputStream(out, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                        archive.extractFile(fh, os);
+                    }
+                }
+            }
+        }
+    }
+
+    private String determineCoverEntryName(Document doc) {
+        String existing = extractFrontCoverImageName(doc);
+        if (existing != null) {
+            String sanitized = sanitizeEntryName(existing);
+            if (sanitized != null) {
+                int idx = sanitized.lastIndexOf('/');
+                String prefix = idx >= 0 ? sanitized.substring(0, idx + 1) : "";
+                return prefix + "cover.jpg";
+            }
+        }
+        return DEFAULT_COVER_ENTRY;
+    }
+
+    private String extractFrontCoverImageName(Document doc) {
+        if (doc == null) {
+            return null;
+        }
+        NodeList pagesNodes = doc.getElementsByTagName("Pages");
+        for (int i = 0; i < pagesNodes.getLength(); i++) {
+            Node node = pagesNodes.item(i);
+            if (node instanceof Element pagesElement) {
+                NodeList pageList = pagesElement.getElementsByTagName("Page");
+                for (int j = 0; j < pageList.getLength(); j++) {
+                    Node pageNode = pageList.item(j);
+                    if (pageNode instanceof Element pageElement) {
+                        String type = pageElement.getAttribute("Type");
+                        if (type != null && type.equalsIgnoreCase("FrontCover")) {
+                            String imageFile = pageElement.getAttribute("ImageFile");
+                            if (imageFile != null && !imageFile.isBlank()) {
+                                return imageFile.trim();
+                            }
+                            String image = pageElement.getAttribute("Image");
+                            if (image != null && !image.isBlank()) {
+                                return image.trim();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private String sanitizeEntryName(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        String normalized = name.replace('\\', '/');
+        while (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        if (!isSafeEntryName(normalized)) {
+            return null;
+        }
+        return normalized;
+    }
+
+    private void ensureFrontCoverPage(Document doc, String coverEntryName, int width, int height) {
+        Element root = doc.getDocumentElement();
+        if (root == null || !"ComicInfo".equals(root.getTagName())) {
+            root = doc.createElement("ComicInfo");
+            doc.appendChild(root);
+        }
+
+        Element pagesElement;
+        NodeList pagesNodes = root.getElementsByTagName("Pages");
+        if (pagesNodes.getLength() > 0) {
+            pagesElement = (Element) pagesNodes.item(0);
+        } else {
+            pagesElement = doc.createElement("Pages");
+            root.appendChild(pagesElement);
+        }
+
+        Element frontCover = null;
+        NodeList pageNodes = pagesElement.getElementsByTagName("Page");
+        for (int i = 0; i < pageNodes.getLength(); i++) {
+            Node node = pageNodes.item(i);
+            if (node instanceof Element pageElement) {
+                String type = pageElement.getAttribute("Type");
+                if (type != null && type.equalsIgnoreCase("FrontCover")) {
+                    frontCover = pageElement;
+                    break;
+                }
+            }
+        }
+
+        if (frontCover == null) {
+            frontCover = doc.createElement("Page");
+            if (pagesElement.hasChildNodes()) {
+                pagesElement.insertBefore(frontCover, pagesElement.getFirstChild());
+            } else {
+                pagesElement.appendChild(frontCover);
+            }
+        }
+
+        frontCover.setAttribute("Type", "FrontCover");
+        frontCover.setAttribute("ImageFile", coverEntryName);
+        frontCover.removeAttribute("Image");
+        if (width > 0) {
+            frontCover.setAttribute("ImageWidth", Integer.toString(width));
+        } else {
+            frontCover.removeAttribute("ImageWidth");
+        }
+        if (height > 0) {
+            frontCover.setAttribute("ImageHeight", Integer.toString(height));
+        } else {
+            frontCover.removeAttribute("ImageHeight");
+        }
+    }
+
+    private byte[] documentToBytes(Document doc) throws Exception {
+        Transformer transformer = TransformerFactory.newInstance().newTransformer();
+        transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+        transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        transformer.transform(new DOMSource(doc), new StreamResult(baos));
+        return baos.toByteArray();
+    }
+
+    private void writeZipEntry(ZipOutputStream zos, String entryName, byte[] data) {
+        try {
+            zos.putNextEntry(new ZipEntry(entryName));
+            zos.write(data);
+            zos.closeEntry();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void addFileToZip(ZipOutputStream zos, Path baseDir, Path file) {
+        String entryName = baseDir.relativize(file).toString().replace(File.separatorChar, '/');
+        if (!isSafeEntryName(entryName)) {
+            log.warn("Skipping unsafe entry during CBZ conversion: {}", entryName);
+            return;
+        }
+        try (InputStream is = Files.newInputStream(file)) {
+            zos.putNextEntry(new ZipEntry(entryName));
+            is.transferTo(zos);
+            zos.closeEntry();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void refreshFileStats(BookEntity bookEntity, Path path) {
+        try {
+            if (!Files.exists(path)) {
+                return;
+            }
+            long sizeKb = Math.max(1L, Files.size(path) / 1024);
+            bookEntity.setFileSizeKb(sizeKb);
+            bookEntity.setCurrentHash(FileFingerprint.generateHash(path));
+        } catch (Exception e) {
+            log.warn("Failed to refresh file stats for {}: {}", path, e.getMessage());
+        }
+    }
+
+    private void deleteDirectoryRecursively(Path directory) {
+        if (directory == null) {
+            return;
+        }
+        try (Stream<Path> walk = Files.walk(directory)) {
+            walk.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (Exception ignore) {
+                }
+            });
+        } catch (Exception ignore) {
+        }
+    }
 
     private ZipEntry findComicInfoEntry(ZipFile zipFile) {
         Enumeration<? extends ZipEntry> entries = zipFile.entries();
@@ -406,34 +1116,6 @@ public class CbxMetadataWriter implements MetadataWriter {
         if (n.contains("../")) return false; // traversal
         if (n.contains("\0")) return false; // NUL
         return true;
-    }
-
-    private void repackZipReplacingComicInfo(Path sourceZip, Path targetZip, byte[] xmlBytes) throws Exception {
-        try (ZipFile zipFile = new ZipFile(sourceZip.toFile());
-             ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(targetZip))) {
-            ZipEntry existing = findComicInfoEntry(zipFile);
-            Enumeration<? extends ZipEntry> entries = zipFile.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String entryName = entry.getName();
-                if (existing != null && entryName.equals(existing.getName())) {
-                    continue; // skip old ComicInfo.xml
-                }
-                if (!isSafeEntryName(entryName)) {
-                    log.warn("Skipping unsafe ZIP entry name: {}", entryName);
-                    continue;
-                }
-                zos.putNextEntry(new ZipEntry(entryName));
-                try (InputStream is = zipFile.getInputStream(entry)) {
-                    is.transferTo(zos);
-                }
-                zos.closeEntry();
-            }
-            String entryName = (existing != null ? existing.getName() : "ComicInfo.xml");
-            zos.putNextEntry(new ZipEntry(entryName));
-            zos.write(xmlBytes);
-            zos.closeEntry();
-        }
     }
 
     private static void atomicReplace(Path temp, Path target) throws Exception {

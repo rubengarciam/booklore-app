@@ -14,13 +14,7 @@ import com.adityachandel.booklore.service.metadata.extractor.CbxMetadataExtracto
 import com.adityachandel.booklore.service.metadata.MetadataMatchService;
 import com.adityachandel.booklore.util.FileService;
 import com.adityachandel.booklore.util.FileUtils;
-import com.github.junrar.Archive;
-import com.github.junrar.rarfile.FileHeader;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry;
-import org.apache.commons.compress.archivers.sevenz.SevenZFile;
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
-import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
@@ -88,90 +82,20 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
     }
 
     private Optional<BufferedImage> extractImagesFromArchive(File file) {
-        String name = file.getName().toLowerCase();
-        if (name.endsWith(".cbz")) {
-            return extractFirstImageFromZip(file);
-        } else if (name.endsWith(".cb7")) {
-            return extractFirstImageFrom7z(file);
-        } else if (name.endsWith(".cbr")) {
-            return extractFirstImageFromRar(file);
-        } else {
-            log.warn("Unsupported CBX format: {}", name);
-            return Optional.empty();
-        }
-    }
-
-    private Optional<BufferedImage> extractFirstImageFromZip(File file) {
-        try (ZipFile zipFile = new ZipFile(file)) {
-            return Collections.list(zipFile.getEntries()).stream()
-                    .filter(e -> !e.isDirectory() && e.getName().matches("(?i).*\\.(jpg|jpeg|png|webp)"))
-                    .min(Comparator.comparing(ZipArchiveEntry::getName))
-                    .map(entry -> {
-                        try (InputStream is = zipFile.getInputStream(entry)) {
-                            return ImageIO.read(is);
-                        } catch (Exception e) {
-                            log.warn("Failed to read image from ZIP entry {}: {}", entry.getName(), e.getMessage());
-                            return null;
-                        }
-                    });
-        } catch (Exception e) {
-            log.error("Error extracting ZIP: {}", e.getMessage());
-            return Optional.empty();
-        }
-    }
-
-    private Optional<BufferedImage> extractFirstImageFrom7z(File file) {
-        try (SevenZFile sevenZFile = new SevenZFile(file)) {
-            List<SevenZArchiveEntry> imageEntries = new ArrayList<>();
-            SevenZArchiveEntry entry;
-            while ((entry = sevenZFile.getNextEntry()) != null) {
-                if (!entry.isDirectory() && entry.getName().matches("(?i).*\\.(jpg|jpeg|png|webp)")) {
-                    imageEntries.add(entry);
-                }
-            }
-            imageEntries.sort(Comparator.comparing(SevenZArchiveEntry::getName));
-
-            try (SevenZFile sevenZFileReset = new SevenZFile(file)) {
-                for (SevenZArchiveEntry imgEntry : imageEntries) {
-                    SevenZArchiveEntry current;
-                    while ((current = sevenZFileReset.getNextEntry()) != null) {
-                        if (current.equals(imgEntry)) {
-                            byte[] content = new byte[(int) current.getSize()];
-                            int offset = 0;
-                            while (offset < content.length) {
-                                int bytesRead = sevenZFileReset.read(content, offset, content.length - offset);
-                                if (bytesRead < 0) break;
-                                offset += bytesRead;
-                            }
-                            return Optional.ofNullable(ImageIO.read(new ByteArrayInputStream(content)));
-                        }
+        try {
+            byte[] coverBytes = cbxMetadataExtractor.extractCover(file);
+            if (coverBytes != null && coverBytes.length > 0) {
+                try (ByteArrayInputStream bais = new ByteArrayInputStream(coverBytes)) {
+                    BufferedImage image = ImageIO.read(bais);
+                    if (image != null) {
+                        return Optional.of(image);
                     }
                 }
             }
         } catch (Exception e) {
-            log.error("Error extracting 7z: {}", e.getMessage());
+            log.warn("Failed to decode cover extracted from {}: {}", file.getName(), e.getMessage());
         }
-        return Optional.empty();
-    }
 
-    private Optional<BufferedImage> extractFirstImageFromRar(File file) {
-        try (Archive archive = new Archive(file)) {
-            List<FileHeader> imageHeaders = archive.getFileHeaders().stream()
-                    .filter(h -> !h.isDirectory() && h.getFileNameString().toLowerCase().matches(".*\\.(jpg|jpeg|png|webp)"))
-                    .sorted(Comparator.comparing(FileHeader::getFileNameString))
-                    .toList();
-
-            for (FileHeader header : imageHeaders) {
-                try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-                    archive.extractFile(header, baos);
-                    return Optional.ofNullable(ImageIO.read(new ByteArrayInputStream(baos.toByteArray())));
-                } catch (Exception e) {
-                    log.warn("Error reading RAR entry {}: {}", header.getFileNameString(), e.getMessage());
-                }
-            }
-        } catch (Exception e) {
-            log.error("Error extracting RAR: {}", e.getMessage());
-        }
         return Optional.empty();
     }
 

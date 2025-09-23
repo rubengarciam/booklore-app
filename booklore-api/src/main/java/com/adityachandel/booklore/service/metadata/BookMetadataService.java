@@ -164,10 +164,12 @@ public class BookMetadataService {
     @Transactional
     public BookMetadata updateCoverImageFromUrl(Long bookId, String url) {
         fileService.createThumbnailFromUrl(bookId, url);
+        log.info("## Updating cover image from URL for book ID: {} - {}", bookId, url);
         return updateCover(bookId, (writer, book) -> writer.replaceCoverImageFromUrl(book, url));
     }
 
     private BookMetadata updateCover(Long bookId, BiConsumer<MetadataWriter, BookEntity> writerAction) {
+        log.info("## Updating cover image for book ID: {}", bookId);
         BookEntity bookEntity = bookRepository.findById(bookId).orElseThrow(() -> ApiError.BOOK_NOT_FOUND.createException(bookId));
         bookEntity.getMetadata().setCoverUpdatedOn(Instant.now());
         MetadataPersistenceSettings settings = appSettingService.getAppSettings().getMetadataPersistenceSettings();
